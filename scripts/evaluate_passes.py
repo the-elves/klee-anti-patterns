@@ -31,7 +31,7 @@ BASE_KLEE_COMMAND = [
     "--run-in-dir=/tmp/sandbox",
     "--max-sym-array-size=4096",
     "--max-solver-time=30s",
-    "--max-time=60min",
+    "--max-time=30s",
     "--watchdog",
     "--max-memory-inhibit=false",
     "--max-static-fork-pct=1",
@@ -60,14 +60,15 @@ def get_pass_combinations(passes, permute_all):
         combos.extend(itertools.combinations(passes, r))
     return combos
 
-def run_klee(bc_path, pass_combo, order, out_root):
+def run_klee(bc_path, pass_combo, order, out_root, max_time):
     bench_name = bc_path.stem
     pass_str = ",".join(pass_combo) if pass_combo else "none"
     run_name = f"{pass_str}_{order}"
     run_dir = out_root / bench_name / run_name
     run_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = list(BASE_KLEE_COMMAND)
+    cmd = [c for c in BASE_KLEE_COMMAND if not c.startswith("--max-time=")]
+    cmd.append(f"--max-time={max_time}")
     cmd.append(f"--output-dir={run_dir}")
     
     if pass_combo:
@@ -113,14 +114,8 @@ def run_klee(bc_path, pass_combo, order, out_root):
     # Collect stats
     stats_csv = run_dir / "stats.csv"
     try:
-        subprocess.run(["klee-stats", "--print-all", "--to-csv", str(run_dir)], 
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        # Note: klee-stats --to-csv might print to stdout or create a file.
-        # On some versions it creates a file, on others it prints to stdout.
-        # Assuming it creates a file based on common usage or redirects.
-        # If it prints to stdout, we capture it.
-        # Let's check klee-stats behavior or use a safer way.
-        stats_proc = subprocess.run(["klee-stats", "--print-all", "--to-csv", str(run_dir)], 
+        # klee-stats --table-format=csv prints processed stats with ICov(%), BCov(%), etc.
+        stats_proc = subprocess.run(["klee-stats", "--print-all", "--table-format=csv", str(run_dir)], 
                                     capture_output=True, text=True, check=True)
         stats_data = stats_proc.stdout
         with open(stats_csv, "w") as f:
@@ -135,8 +130,9 @@ def run_klee(bc_path, pass_combo, order, out_root):
             "Order": order,
             "ICov(%)": row.get("ICov(%)", "0.0"),
             "BCov(%)": row.get("BCov(%)", "0.0"),
-            "Paths": row.get("Paths", "0"),
+            "Paths": row.get("TermExit", row.get("Paths", "0")),
             "Time(s)": row.get("Time(s)", "0.0"),
+            "SolverTime(s)": row.get("TSolver(s)", "0.0"),
             "Status": status
         }
     except Exception as e:
@@ -148,6 +144,7 @@ def run_klee(bc_path, pass_combo, order, out_root):
             "BCov(%)": "N/A",
             "Paths": "N/A",
             "Time(s)": "N/A",
+            "SolverTime(s)": "N/A",
             "Status": f"Stats Error: {str(e)}"
         }
 
@@ -168,6 +165,7 @@ def main():
     parser.add_argument("--both-before-after", action="store_true", help="Run passes both before and after KLEE opts")
     parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
     parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
+    parser.add_argument("--max-time", default="60min", help="Max time for KLEE (e.g., 60s, 1h, 60mins)")
 
     args = parser.parse_args()
 
@@ -204,7 +202,7 @@ def main():
     for bc_file in bc_files:
         for combo in pass_combos:
             for order in orders:
-                tasks.append((bc_file, combo, order, out_root))
+                tasks.append((bc_file, combo, order, out_root, args.max_time))
 
     results = []
     print(f"Starting {len(tasks)} tasks with {args.jobs} parallel jobs...")
@@ -217,7 +215,7 @@ def main():
 
     # Aggregate by benchmark
     benchmarks = sorted(list(set(r['Benchmark'] for r in results)))
-    headers = ["Benchmark", "Passes", "Order", "ICov(%)", "BCov(%)", "Paths", "Time(s)", "Status"]
+    headers = ["Benchmark", "Passes", "Order", "ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
     
     for bench in benchmarks:
         bench_results = [r for r in results if r['Benchmark'] == bench]
