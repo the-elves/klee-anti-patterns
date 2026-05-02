@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import shutil
 import sys
 import argparse
 import subprocess
@@ -150,6 +151,14 @@ def run_klee(bc_path, pass_combo, order, out_root):
             "Status": f"Stats Error: {str(e)}"
         }
 
+def create_environment(out_dir: Path, assets_path:Path):
+    shutil.copy(assets_path/"testing-env.sh", out_dir)
+    shutil.copy(assets_path/"sandbox.tgz", "/tmp")
+    os.chdir("/tmp")
+    subprocess.run(["tar", "xfv", "sandbox.tgz"])
+    os.chdir(out_dir)
+    subprocess.run("env -i /bin/bash -c".split(" ")+["(source testing-env.sh; env >test.env)"])
+
 def main():
     parser = argparse.ArgumentParser(description="Automate KLEE optimization pass evaluation.")
     parser.add_argument("--bench-dir", required=True, help="Directory containing .bc files")
@@ -158,6 +167,7 @@ def main():
     parser.add_argument("--permute-all", action="store_true", help="Run all combinations of passes")
     parser.add_argument("--both-before-after", action="store_true", help="Run passes both before and after KLEE opts")
     parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
+    parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
 
     args = parser.parse_args()
 
@@ -179,6 +189,8 @@ def main():
     if not bc_files:
         print(f"No .bc files found in {bench_dir}")
         sys.exit(1)
+
+    create_environment(out_root, args.assets_dir)
 
     pass_combos = get_pass_combinations(args.passes, args.permute_all)
     # Add a baseline run with no passes
