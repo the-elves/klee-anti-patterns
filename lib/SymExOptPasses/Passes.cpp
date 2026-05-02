@@ -3,6 +3,7 @@
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace llvm {
 class FunctionPass;
@@ -37,6 +38,12 @@ void applySymExOptPasses(llvm::Module &M,
   if (added) {
     PM.run(M);
   }
+}
+
+void printSymExOptPasses() {
+  llvm::outs() << "Available symbolic execution optimization passes:\n"
+               << "  dummy-pass\n"
+               << "  anti-flattening\n";
 }
 
 } // namespace klee

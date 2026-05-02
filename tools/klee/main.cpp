@@ -22,6 +22,7 @@
 #include "klee/Support/ModuleUtil.h"
 #include "klee/Support/OptionCategories.h"
 #include "klee/Support/PrintVersion.h"
+#include "klee/SymExOptPasses/Passes.h"
 #include "klee/System/Time.h"
 
 #include "klee/Support/CompilerWarning.h"
@@ -172,6 +173,11 @@ namespace {
       "symex-opts-after-klee", cl::init(false),
       cl::desc("Run symex-opts passes after KLEE's own optimization passes "
                "(default=false, meaning they run before)"),
+      cl::cat(StartCat));
+
+  cl::opt<bool> ListSymExOpts(
+      "list-symex-opts", cl::init(false),
+      cl::desc("List available symbolic execution optimization passes"),
       cl::cat(StartCat));
 
   cl::opt<bool>
@@ -1261,6 +1267,10 @@ int main(int argc, char **argv, char **envp) {
   llvm::InitializeNativeTarget();
 
   parseArguments(argc, argv);
+  if (ListSymExOpts) {
+    klee::printSymExOptPasses();
+    return 0;
+  }
   sys::PrintStackTraceOnErrorSignal(argv[0]);
 
   if (Watchdog) {
