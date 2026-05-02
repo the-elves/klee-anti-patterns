@@ -11,6 +11,7 @@
 
 #include "klee/Module/KModule.h"
 
+#include "klee/SymExOptPasses/Passes.h"
 #include "ModuleHelper.h"
 #include "Passes.h"
 
@@ -206,8 +207,16 @@ void KModule::optimiseAndPrepare(
   if (opts.CheckOvershift)
     addInternalFunction("klee_overshift_check");
 
+  if (!opts.SymExOptsAfterKlee) {
+    klee::applySymExOptPasses(*module, opts.SymExOpts);
+  }
+
   klee::optimiseAndPrepare(OptimiseKLEECall, opts.Optimize, SwitchType,
                            opts.EntryPoint, preservedFunctions, module.get());
+
+  if (opts.SymExOptsAfterKlee) {
+    klee::applySymExOptPasses(*module, opts.SymExOpts);
+  }
 }
 
 void KModule::manifest(InterpreterHandler *ih, bool forceSourceOutput) {

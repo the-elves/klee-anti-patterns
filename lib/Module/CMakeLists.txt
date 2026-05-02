@@ -57,6 +57,7 @@ llvm_config(kleeModule "${USE_LLVM_SHARED}"
 
 target_link_libraries(kleeModule PRIVATE
   kleeSupport
+  kleeSymExOptPasses
 )
 target_include_directories(kleeModule PRIVATE ${KLEE_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
 target_compile_options(kleeModule PRIVATE ${KLEE_COMPONENT_CXX_FLAGS})

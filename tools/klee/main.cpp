@@ -162,6 +162,18 @@ namespace {
 		 cl::init(false),
                  cl::cat(StartCat));
 
+  cl::list<std::string> SymExOpts(
+      "symex-opts", cl::CommaSeparated,
+      cl::desc("Comma-separated list of symbolic execution optimization passes "
+               "to apply"),
+      cl::cat(StartCat));
+
+  cl::opt<bool> SymExOptsAfterKlee(
+      "symex-opts-after-klee", cl::init(false),
+      cl::desc("Run symex-opts passes after KLEE's own optimization passes "
+               "(default=false, meaning they run before)"),
+      cl::cat(StartCat));
+
   cl::opt<bool>
   WarnAllExternals("warn-all-external-symbols",
                    cl::desc("Issue a warning on startup for all external symbols (default=false)."),
@@ -1370,7 +1382,9 @@ int main(int argc, char **argv, char **envp) {
   Interpreter::ModuleOptions Opts(LibraryDir.c_str(), EntryPoint, opt_suffix,
                                   /*Optimize=*/OptimizeModule,
                                   /*CheckDivZero=*/CheckDivZero,
-                                  /*CheckOvershift=*/CheckOvershift);
+                                  /*CheckOvershift=*/CheckOvershift,
+                                  SymExOpts,
+                                  SymExOptsAfterKlee);
 
   // Get the main function
   for (auto &module : loadedModules) {

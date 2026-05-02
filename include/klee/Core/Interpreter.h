@@ -60,13 +60,18 @@ public:
     bool Optimize;
     bool CheckDivZero;
     bool CheckOvershift;
+    std::vector<std::string> SymExOpts;
+    bool SymExOptsAfterKlee;
 
     ModuleOptions(const std::string &_LibraryDir,
                   const std::string &_EntryPoint, const std::string &_OptSuffix,
-                  bool _Optimize, bool _CheckDivZero, bool _CheckOvershift)
+                  bool _Optimize, bool _CheckDivZero, bool _CheckOvershift,
+                  const std::vector<std::string> &_SymExOpts,
+                  bool _SymExOptsAfterKlee)
         : LibraryDir(_LibraryDir), EntryPoint(_EntryPoint),
           OptSuffix(_OptSuffix), Optimize(_Optimize),
-          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift) {}
+          CheckDivZero(_CheckDivZero), CheckOvershift(_CheckOvershift),
+          SymExOpts(_SymExOpts), SymExOptsAfterKlee(_SymExOptsAfterKlee) {}
   };
 
   enum LogType
