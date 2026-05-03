@@ -61,6 +61,8 @@ struct ObjectLinearizationPass : public ModulePass {
     for (GlobalVariable &GV : M.globals()) {
       if (GV.isDeclaration() || GV.isConstant())
         continue;
+      if (!GV.hasLocalLinkage())
+        continue;
       if (GV.getName().starts_with("klee") || GV.getName().starts_with("__klee"))
         continue;
       
@@ -73,6 +75,9 @@ struct ObjectLinearizationPass : public ModulePass {
 
       uint64_t Size = DL.getTypeAllocSize(Ty);
       if (Size == 0) continue;
+
+      uint64_t Align = DL.getABITypeAlign(Ty).value();
+      TotalSize = (TotalSize + Align - 1) & ~(Align - 1);
 
       Objects.push_back({&GV, Ty, Size, TotalSize});
       TotalSize += Size;
@@ -97,6 +102,9 @@ struct ObjectLinearizationPass : public ModulePass {
             uint64_t Size = DL.getTypeAllocSize(Ty);
             if (Size == 0) continue;
 
+            uint64_t Align = DL.getABITypeAlign(Ty).value();
+            TotalSize = (TotalSize + Align - 1) & ~(Align - 1);
+
             Objects.push_back({AI, Ty, Size, TotalSize});
             TotalSize += Size;
           }
@@ -115,10 +123,27 @@ struct ObjectLinearizationPass : public ModulePass {
         M, LinearMemTy, false, GlobalValue::ExternalLinkage,
         ConstantAggregateZero::get(LinearMemTy), "__klee_linear_memory");
 
+    uint64_t MaxAlign = 1;
+    for (const auto &Info : Objects) {
+      MaxAlign = std::max(MaxAlign, DL.getABITypeAlign(Info.AllocatedType).value());
+    }
+    LinearMem->setAlignment(Align(MaxAlign));
+
     FunctionCallee KleeReportError = M.getOrInsertFunction(
         "klee_report_error", Type::getVoidTy(Ctx),
         PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx),
         PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx));
+
+    auto GetPointerOffset = [&](Value *Ptr, Value *Base) -> Value* {
+      if (Ptr->stripPointerCasts() == Base->stripPointerCasts())
+        return ConstantInt::get(Type::getInt64Ty(Ctx), 0);
+
+      APInt Offset(DL.getIndexSizeInBits(0), 0);
+      if (Ptr->stripAndAccumulateInBoundsConstantOffsets(DL, Offset) == Base->stripPointerCasts()) {
+        return ConstantInt::get(Type::getInt64Ty(Ctx), Offset.getZExtValue());
+      }
+      return nullptr;
+    };
 
     for (const auto &Info : Objects) {
       Value *OrigVal = Info.OriginalValue;
@@ -136,6 +161,7 @@ struct ObjectLinearizationPass : public ModulePass {
         Replacement = ConstantExpr::getBitCast(GEP, GV->getType());
       } else if (auto *AI = dyn_cast<AllocaInst>(OrigVal)) {
         Builder.SetInsertPoint(AI);
+        Builder.SetCurrentDebugLocation(AI->getDebugLoc());
         std::vector<Value *> Indices = {
             ConstantInt::get(Type::getInt64Ty(Ctx), 0),
             ConstantInt::get(Type::getInt64Ty(Ctx), Offset)};
@@ -146,17 +172,19 @@ struct ObjectLinearizationPass : public ModulePass {
       if (!Replacement) continue;
 
       std::vector<User *> Worklist(OrigVal->user_begin(), OrigVal->user_end());
+      std::set<User *> Visited;
       std::vector<Instruction *> Accessors;
-      std::map<Instruction *, Value *> AccessorToPtr;
 
       while (!Worklist.empty()) {
         User *U = Worklist.back();
         Worklist.pop_back();
+        if (!Visited.insert(U).second) continue;
 
         if (auto *I = dyn_cast<Instruction>(U)) {
           Accessors.push_back(I);
-          // For GEPs, the GEP itself is the accessor we want to check
-          // For Load/Store, the pointer operand is what we check
+          if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) || isa<PHINode>(I) || isa<SelectInst>(I)) {
+            for (User *UU : I->users()) Worklist.push_back(UU);
+          }
         } else if (auto *CE = dyn_cast<ConstantExpr>(U)) {
           for (User *CEU : CE->users()) {
             Worklist.push_back(CEU);
@@ -165,7 +193,9 @@ struct ObjectLinearizationPass : public ModulePass {
       }
 
       for (Instruction *I : Accessors) {
+        if (isa<PHINode>(I) || isa<SelectInst>(I)) continue;
         Builder.SetInsertPoint(I);
+        Builder.SetCurrentDebugLocation(I->getDebugLoc());
         Value *ByteOffset = nullptr;
         Value *Ptr = nullptr;
 
@@ -178,6 +208,46 @@ struct ObjectLinearizationPass : public ModulePass {
         } else if (auto *SI = dyn_cast<StoreInst>(I)) {
           if (SI->getPointerOperand()->stripPointerCasts() == OrigVal)
             Ptr = SI->getPointerOperand();
+        } else if (auto *CB = dyn_cast<CallBase>(I)) {
+          Function *F = CB->getCalledFunction();
+          if (F && F->isDeclaration() && !F->isIntrinsic() && !F->getName().starts_with("klee")) {
+            bool needed = false;
+            for (unsigned j=0; j<CB->arg_size(); ++j) {
+              if (GetPointerOffset(CB->getArgOperand(j), OrigVal)) {
+                needed = true;
+                break;
+              }
+            }
+            if (needed) {
+              Function *ParentF = I->getFunction();
+              IRBuilder<> EntryBuilder(&ParentF->getEntryBlock(), ParentF->getEntryBlock().begin());
+              AllocaInst *Tmp = EntryBuilder.CreateAlloca(Info.AllocatedType, nullptr, "linear.rebuild." + OrigVal->getName());
+              Tmp->setAlignment(DL.getABITypeAlign(Info.AllocatedType));
+
+              Builder.CreateMemCpy(Tmp, Tmp->getAlign(), Replacement, Replacement->getPointerAlignment(DL), ObjSize);
+
+              for (unsigned j=0; j<CB->arg_size(); ++j) {
+                if (Value *Off = GetPointerOffset(CB->getArgOperand(j), OrigVal)) {
+                  Value *Tmp8 = Builder.CreateBitCast(Tmp, Type::getInt8PtrTy(Ctx));
+                  Value *NewArg8 = Builder.CreateGEP(Type::getInt8Ty(Ctx), Tmp8, Off);
+                  Value *NewArg = Builder.CreateBitCast(NewArg8, CB->getArgOperand(j)->getType());
+                  CB->setArgOperand(j, NewArg);
+                }
+              }
+
+              if (auto *CI = dyn_cast<CallInst>(CB)) {
+                if (!CI->doesNotReturn() && !CI->isTerminator()) {
+                  Builder.SetInsertPoint(CI->getNextNode());
+                  Builder.SetCurrentDebugLocation(CI->getDebugLoc());
+                  Builder.CreateMemCpy(Replacement, Replacement->getPointerAlignment(DL), Tmp, Tmp->getAlign(), ObjSize);
+                }
+              } else if (auto *II = dyn_cast<InvokeInst>(CB)) {
+                Builder.SetInsertPoint(&II->getNormalDest()->front());
+                Builder.SetCurrentDebugLocation(II->getDebugLoc());
+                Builder.CreateMemCpy(Replacement, Replacement->getPointerAlignment(DL), Tmp, Tmp->getAlign(), ObjSize);
+              }
+            }
+          }
         }
 
         if (Ptr) {
@@ -219,14 +289,14 @@ struct ObjectLinearizationPass : public ModulePass {
         
         if (ByteOffset) {
           Value *Cond = Builder.CreateICmpUGE(ByteOffset, ConstantInt::get(Type::getInt64Ty(Ctx), ObjSize));
-          Instruction *ThenTerm = SplitBlockAndInsertIfThen(Cond, I, false);
+          Instruction *ThenTerm = SplitBlockAndInsertIfThen(Cond, I, true);
           Builder.SetInsertPoint(ThenTerm);
+          Builder.SetCurrentDebugLocation(I->getDebugLoc());
           Value *File = Builder.CreateGlobalStringPtr("ObjectLinearization.cpp");
           Value *Line = ConstantInt::get(Type::getInt32Ty(Ctx), 0);
           Value *Msg = Builder.CreateGlobalStringPtr("out of bounds access (linearized)");
           Value *Suffix = Builder.CreateGlobalStringPtr("ptr.err");
           Builder.CreateCall(KleeReportError, {File, Line, Msg, Suffix});
-          Builder.CreateUnreachable();
         }
       }
 

@@ -525,7 +525,7 @@ if (ENABLE_KLEE_LIBCXX)
           NAMES __config_site # We are searching for a platform-specific C++ library header called `__config_site`
           DOC "Path to platform-specific libc++ include directory"
           PATH_SUFFIXES "x86_64-unknown-linux-gnu/c++/v1" "include/x86_64-unknown-linux-gnu/c++/v1"
-          HINTS ${KLEE_LIBCXX_INCLUDE_DIR}
+          HINTS ${KLEE_LIBCXX_DIR}
           NO_DEFAULT_PATH # Make sure we don't pick-up the standard library's path
   )
 
