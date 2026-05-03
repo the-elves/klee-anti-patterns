@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include <map>
+#include <set>
 #include <vector>
 
 using namespace llvm;
@@ -33,9 +34,12 @@ struct ObjectLinearizationPass : public ModulePass {
 
     auto IsUsedInKleeMakeSymbolic = [](Value *V) {
       std::vector<User *> Worklist(V->user_begin(), V->user_end());
+      std::set<User *> Visited;
       while (!Worklist.empty()) {
         User *U = Worklist.back();
         Worklist.pop_back();
+        if (!Visited.insert(U).second) continue;
+
         if (auto *CB = dyn_cast<CallBase>(U)) {
           Function *F = CB->getCalledFunction();
           if (F && F->getName() == "klee_make_symbolic")
@@ -46,6 +50,8 @@ struct ObjectLinearizationPass : public ModulePass {
            for (User *GU : GEP->users()) Worklist.push_back(GU);
         } else if (auto *BC = dyn_cast<BitCastInst>(U)) {
            for (User *BU : BC->users()) Worklist.push_back(BU);
+        } else if (auto *PHI = dyn_cast<PHINode>(U)) {
+           for (User *PU : PHI->users()) Worklist.push_back(PU);
         }
       }
       return false;

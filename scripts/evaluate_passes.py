@@ -77,8 +77,11 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
             
         reader = csv.DictReader(lines)
         # Skip the first row (sums) and get the actual data row
-        next(reader) 
-        row = next(reader)
+        try:
+            next(reader) 
+            row = next(reader)
+        except StopIteration:
+            raise ValueError("klee-stats output has no data row")
         
         # Calculate percentages
         try:
