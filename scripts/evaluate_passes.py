@@ -60,9 +60,51 @@ def get_pass_combinations(passes, permute_all):
         combos.extend(itertools.combinations(passes, r))
     return combos
 
+def get_stats(run_dir, bench_name, pass_combo, order, status):
+    pass_str = ",".join(pass_combo) if pass_combo else "none"
+    stats_csv = run_dir / "stats.csv"
+    try:
+        # klee-stats --table-format=csv prints processed stats with ICov(%), BCov(%), etc.
+        stats_cmd = ["klee-stats", "--print-all", "--table-format=csv", str(run_dir)]
+        stats_proc = subprocess.run(stats_cmd, capture_output=True, text=True, check=True)
+        stats_data = stats_proc.stdout
+        with open(stats_csv, "w") as f:
+            f.write(stats_data)
+        
+        lines = stats_data.splitlines()
+        if len(lines) < 2:
+            raise ValueError("klee-stats output too short")
+            
+        reader = csv.DictReader(lines)
+        row = next(reader)
+        
+        return {
+            "Benchmark": bench_name,
+            "Passes": pass_str,
+            "Order": order,
+            "ICov(%)": row.get("ICov(%)", "0.0"),
+            "BCov(%)": row.get("BCov(%)", "0.0"),
+            "Paths": row.get("TermExit", row.get("Paths", "0")),
+            "Time(s)": row.get("Time(s)", "0.0"),
+            "SolverTime(s)": row.get("TSolver(s)", row.get("SolverTime(s)", "0.0")),
+            "Status": status
+        }
+    except Exception as e:
+        return {
+            "Benchmark": bench_name,
+            "Passes": pass_str,
+            "Order": order,
+            "ICov(%)": "N/A",
+            "BCov(%)": "N/A",
+            "Paths": "N/A",
+            "Time(s)": "N/A",
+            "SolverTime(s)": "N/A",
+            "Status": f"Stats Error: {str(e)}"
+        }
+
 def run_klee(bc_path, pass_combo, order, out_root, max_time):
     bench_name = bc_path.stem
-    pass_str = ",".join(pass_combo) if pass_combo else "none"
+    pass_str = "_".join(pass_combo) if pass_combo else "none"
     run_name = f"{pass_str}_{order}"
     run_dir = out_root / bench_name / run_name
     run_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -123,66 +165,165 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
     elif assembly_ll.exists():
         subprocess.run(["llvm-as-16", str(assembly_ll), "-o", str(transformed_bc)], check=False)
 
-    # Collect stats
-    stats_csv = run_dir / "stats.csv"
-    try:
-        # klee-stats --table-format=csv prints processed stats with ICov(%), BCov(%), etc.
-        # We only pass run_dir to ensure it uses the consistent stats recorded during execution.
-        stats_cmd = ["klee-stats", "--print-all", "--table-format=csv", str(run_dir)]
-            
-        stats_proc = subprocess.run(stats_cmd, capture_output=True, text=True, check=True)
-        stats_data = stats_proc.stdout
-        with open(stats_csv, "w") as f:
-            f.write(stats_data)
-        
-        # Parse coverage from stats_data
-        reader = csv.DictReader(stats_data.splitlines())
-        row = next(reader)
-        return {
-            "Benchmark": bench_name,
-            "Passes": pass_str,
-            "Order": order,
-            "ICov(%)": row.get("ICov(%)", "0.0"),
-            "BCov(%)": row.get("BCov(%)", "0.0"),
-            "Paths": row.get("TermExit", row.get("Paths", "0")),
-            "Time(s)": row.get("Time(s)", "0.0"),
-            "SolverTime(s)": row.get("TSolver(s)", "0.0"),
-            "Status": status
-        }
-    except Exception as e:
-        return {
-            "Benchmark": bench_name,
-            "Passes": pass_str,
-            "Order": order,
-            "ICov(%)": "N/A",
-            "BCov(%)": "N/A",
-            "Paths": "N/A",
-            "Time(s)": "N/A",
-            "SolverTime(s)": "N/A",
-            "Status": f"Stats Error: {str(e)}"
-        }
+    return get_stats(run_dir, bench_name, pass_combo, order, status)
 
 def create_environment(out_dir: Path, assets_path:Path):
+    if not (assets_path/"testing-env.sh").exists():
+        print(f"Warning: assets-dir {assets_path} does not contain testing-env.sh")
+        return
     shutil.copy(assets_path/"testing-env.sh", out_dir)
     shutil.copy(assets_path/"sandbox.tgz", "/tmp")
+    curr_dir = os.getcwd()
     os.chdir("/tmp")
     subprocess.run(["tar", "xfv", "sandbox.tgz"])
     os.chdir(out_dir)
     subprocess.run("env -i /bin/bash -c".split(" ")+["(source testing-env.sh; env >test.env)"])
+    os.chdir(curr_dir)
+
+def aggregate_results(results, out_root):
+    # Unpivoted Results
+    headers = ["Benchmark", "Passes", "Order", "ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
+    raw_csv = out_root / "raw_coverage.csv"
+    with open(raw_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(results)
+    
+    # Per-benchmark CSVs
+    benchmarks = sorted(list(set(r['Benchmark'] for r in results)))
+    for bench in benchmarks:
+        bench_results = [r for r in results if r['Benchmark'] == bench]
+        bench_csv = out_root / bench / "coverage.csv"
+        bench_csv.parent.mkdir(parents=True, exist_ok=True)
+        with open(bench_csv, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(bench_results)
+
+    # Master Pivoted CSV
+    master_csv = out_root / "master_coverage.csv"
+    
+    all_configs = sorted(list(set((r["Passes"], r["Order"]) for r in results)))
+    
+    metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
+    numeric_metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)"]
+    baseline_config = ("none", "before")
+    
+    master_headers = ["Benchmark"]
+    for p, o in all_configs:
+        for m in metrics:
+            master_headers.append(f"{p}_{o}_{m}")
+        for m in numeric_metrics:
+            master_headers.append(f"{p}_{o}_{m}_%")
+    
+    pivoted_results = {}
+    for r in results:
+        bench = r["Benchmark"]
+        if bench not in pivoted_results:
+            pivoted_results[bench] = {"Benchmark": bench}
+        
+        p = r["Passes"]
+        o = r["Order"]
+        for m in metrics:
+            pivoted_results[bench][f"{p}_{o}_{m}"] = r[m]
+
+    # Calculate % changes relative to baseline
+    for bench in pivoted_results:
+        row = pivoted_results[bench]
+        bp, bo = baseline_config
+        for p, o in all_configs:
+            for m in numeric_metrics:
+                col_name = f"{p}_{o}_{m}"
+                pct_col_name = f"{p}_{o}_{m}_%"
+                
+                val = row.get(col_name)
+                base_val = row.get(f"{bp}_{bo}_{m}")
+                
+                try:
+                    v = float(val)
+                    bv = float(base_val)
+                    if bv == 0:
+                        row[pct_col_name] = "0.0" if v == 0 else "inf"
+                    else:
+                        row[pct_col_name] = f"{(v - bv) / bv * 100:.2f}"
+                except (ValueError, TypeError, ZeroDivisionError):
+                    row[pct_col_name] = "N/A"
+
+    with open(master_csv, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=master_headers)
+        writer.writeheader()
+        for bench in sorted(pivoted_results.keys()):
+            writer.writerow(pivoted_results[bench])
+
+    print(f"\nAggregation complete.")
+    print(f"Raw results (unpivoted): {raw_csv}")
+    print(f"Master results (pivoted): {master_csv}")
+
+def collect_existing(out_root, jobs):
+    out_root = Path(out_root).expanduser().resolve()
+    print(f"Collecting results from {out_root}")
+    
+    # Find all config.json files
+    config_files = list(out_root.glob("**/config.json"))
+    print(f"Found {len(config_files)} run directories.")
+    
+    results = []
+    with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
+        futures = []
+        for config_path in config_files:
+            run_dir = config_path.parent
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            
+            bench_name = Path(config["bc_file"]).stem
+            pass_combo = config["passes"]
+            order = config["order"]
+            status = config.get("status", "Unknown")
+            
+            futures.append(executor.submit(get_stats, run_dir, bench_name, pass_combo, order, status))
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                res = future.result()
+                if res:
+                    results.append(res)
+                    print(f"Collected: {res['Benchmark']} | {res['Passes']} | {res['Order']}")
+            except Exception as e:
+                print(f"Error collecting result: {e}")
+    
+    if results:
+        aggregate_results(results, out_root)
+    else:
+        print("No results collected.")
 
 def main():
     parser = argparse.ArgumentParser(description="Automate KLEE optimization pass evaluation.")
-    parser.add_argument("--bench-dir", required=True, help="Directory containing .bc files")
-    parser.add_argument("--passes", nargs="+", required=True, help="Names of optimization passes")
-    parser.add_argument("--out-dir", help="Output root directory")
-    parser.add_argument("--permute-all", action="store_true", help="Run all combinations of passes")
-    parser.add_argument("--both-before-after", action="store_true", help="Run passes both before and after KLEE opts")
-    parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
-    parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
-    parser.add_argument("--max-time", default="60min", help="Max time for KLEE (e.g., 60s, 1h, 60mins)")
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    subparsers.required = True
+
+    # Run command
+    run_parser = subparsers.add_parser("run", help="Run KLEE and collect stats")
+    run_parser.add_argument("--bench-dir", required=True, help="Directory containing .bc files")
+    run_parser.add_argument("--passes", nargs="+", required=True, help="Names of optimization passes")
+    run_parser.add_argument("--out-dir", help="Output root directory")
+    run_parser.add_argument("--permute-all", action="store_true", help="Run all combinations of passes")
+    run_parser.add_argument("--both-before-after", action="store_true", help="Run passes both before and after KLEE opts")
+    run_parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
+    run_parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
+    run_parser.add_argument("--max-time", default="60min", help="Max time for KLEE (e.g., 60s, 1h, 60mins)")
+
+    # Collect command
+    collect_parser = subparsers.add_parser("collect", help="Collect stats from an existing output folder")
+    collect_parser.add_argument("--out-dir", required=True, help="Output root directory to collect from")
+    collect_parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
 
     args = parser.parse_args()
 
+    if args.command == "collect":
+        collect_existing(args.out_dir, args.jobs)
+        return
+
+    # Run command logic
     bench_dir = Path(args.bench_dir).expanduser().resolve()
     if not bench_dir.is_dir():
         print(f"Error: {bench_dir} is not a directory.")
@@ -224,85 +365,18 @@ def main():
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as executor:
         future_to_task = {executor.submit(run_klee, *task): task for task in tasks}
         for future in concurrent.futures.as_completed(future_to_task):
-            res = future.result()
-            results.append(res)
-            print(f"Finished: {res['Benchmark']} | {res['Passes']} | {res['Order']} | ICov: {res['ICov(%)']}%")
+            try:
+                res = future.result()
+                if res:
+                    results.append(res)
+                    print(f"Finished: {res['Benchmark']} | {res['Passes']} | {res['Order']} | ICov: {res['ICov(%)']}%")
+            except Exception as e:
+                print(f"Task failed: {e}")
 
-    # Aggregate by benchmark
-    benchmarks = sorted(list(set(r['Benchmark'] for r in results)))
-    headers = ["Benchmark", "Passes", "Order", "ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
-    
-    for bench in benchmarks:
-        bench_results = [r for r in results if r['Benchmark'] == bench]
-        bench_csv = out_root / bench / "coverage.csv"
-        with open(bench_csv, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=headers)
-            writer.writeheader()
-            writer.writerows(bench_results)
-
-    # Aggregate Master CSV
-    master_csv = out_root / "master_coverage.csv"
-    
-    # Identify all unique (Passes, Order) configurations in the order they were defined
-    all_configs = []
-    for combo in pass_combos:
-        p_str = ",".join(combo) if combo else "none"
-        for order in orders:
-            all_configs.append((p_str, order))
-
-    metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
-    numeric_metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)"]
-    baseline_config = ("none", "before")
-    
-    master_headers = ["Benchmark"]
-    for p, o in all_configs:
-        for m in metrics:
-            master_headers.append(f"{p}_{o}_{m}")
-        # Add % change columns for numeric metrics
-        for m in numeric_metrics:
-            master_headers.append(f"{p}_{o}_{m}_%")
-    
-    # Pivot results: one row per benchmark
-    pivoted_results = {}
-    for r in results:
-        bench = r["Benchmark"]
-        if bench not in pivoted_results:
-            pivoted_results[bench] = {"Benchmark": bench}
-        
-        p = r["Passes"]
-        o = r["Order"]
-        for m in metrics:
-            pivoted_results[bench][f"{p}_{o}_{m}"] = r[m]
-
-    # Calculate % changes relative to baseline
-    for bench in pivoted_results:
-        row = pivoted_results[bench]
-        bp, bo = baseline_config
-        for p, o in all_configs:
-            for m in numeric_metrics:
-                col_name = f"{p}_{o}_{m}"
-                pct_col_name = f"{p}_{o}_{m}_%"
-                
-                val = row.get(col_name)
-                base_val = row.get(f"{bp}_{bo}_{m}")
-                
-                try:
-                    v = float(val)
-                    bv = float(base_val)
-                    if bv == 0:
-                        row[pct_col_name] = "0.0" if v == 0 else "inf"
-                    else:
-                        row[pct_col_name] = f"{(v - bv) / bv * 100:.2f}"
-                except (ValueError, TypeError, ZeroDivisionError):
-                    row[pct_col_name] = "N/A"
-
-    with open(master_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=master_headers)
-        writer.writeheader()
-        for bench in sorted(pivoted_results.keys()):
-            writer.writerow(pivoted_results[bench])
-
-    print(f"\nEvaluation complete. Master results saved to: {master_csv}")
+    if results:
+        aggregate_results(results, out_root)
+    else:
+        print("No results generated.")
 
 if __name__ == "__main__":
     main()
