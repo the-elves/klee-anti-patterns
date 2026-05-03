@@ -66,6 +66,8 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
     run_name = f"{pass_str}_{order}"
     run_dir = out_root / bench_name / run_name
     run_dir.parent.mkdir(parents=True, exist_ok=True)
+    
+    transformed_bc_dir = out_root / "transformed_bitcodes"
 
     cmd = [c for c in BASE_KLEE_COMMAND if not c.startswith("--max-time=")]
     cmd.append(f"--max-time={max_time}")
@@ -91,7 +93,7 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
         stdout_log = ""
         stderr_log = str(e)
 
-    # Ensure run_dir exists (it should if KLEE ran, but just in case of early failure)
+    # Ensure run_dir exists
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Save logs and config
@@ -111,12 +113,24 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
     with open(run_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)
 
+    # Capture transformed bitcode
+    assembly_ll = run_dir / "assembly.ll"
+    final_bc = run_dir / "final.bc"
+    transformed_bc = transformed_bc_dir / f"{bench_name}_{run_name}.bc"
+    
+    if final_bc.exists():
+        shutil.copy(str(final_bc), str(transformed_bc))
+    elif assembly_ll.exists():
+        subprocess.run(["llvm-as-16", str(assembly_ll), "-o", str(transformed_bc)], check=False)
+
     # Collect stats
     stats_csv = run_dir / "stats.csv"
     try:
         # klee-stats --table-format=csv prints processed stats with ICov(%), BCov(%), etc.
-        stats_proc = subprocess.run(["klee-stats", "--print-all", "--table-format=csv", str(run_dir)], 
-                                    capture_output=True, text=True, check=True)
+        # We only pass run_dir to ensure it uses the consistent stats recorded during execution.
+        stats_cmd = ["klee-stats", "--print-all", "--table-format=csv", str(run_dir)]
+            
+        stats_proc = subprocess.run(stats_cmd, capture_output=True, text=True, check=True)
         stats_data = stats_proc.stdout
         with open(stats_csv, "w") as f:
             f.write(stats_data)
@@ -181,6 +195,7 @@ def main():
         out_root = Path("~/Workspace/AntiPasses-Evaluation").expanduser() / timestamp
     
     out_root.mkdir(parents=True, exist_ok=True)
+    (out_root / "transformed_bitcodes").mkdir(exist_ok=True)
     print(f"Output directory: {out_root}")
 
     bc_files = list(bench_dir.glob("*.bc"))
