@@ -227,10 +227,38 @@ def main():
 
     # Aggregate Master CSV
     master_csv = out_root / "master_coverage.csv"
+    
+    # Identify all unique (Passes, Order) configurations in the order they were defined
+    all_configs = []
+    for combo in pass_combos:
+        p_str = ",".join(combo) if combo else "none"
+        for order in orders:
+            all_configs.append((p_str, order))
+
+    metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
+    
+    master_headers = ["Benchmark"]
+    for p, o in all_configs:
+        for m in metrics:
+            master_headers.append(f"{p}_{o}_{m}")
+    
+    # Pivot results: one row per benchmark
+    pivoted_results = {}
+    for r in results:
+        bench = r["Benchmark"]
+        if bench not in pivoted_results:
+            pivoted_results[bench] = {"Benchmark": bench}
+        
+        p = r["Passes"]
+        o = r["Order"]
+        for m in metrics:
+            pivoted_results[bench][f"{p}_{o}_{m}"] = r[m]
+
     with open(master_csv, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=headers)
+        writer = csv.DictWriter(f, fieldnames=master_headers)
         writer.writeheader()
-        writer.writerows(results)
+        for bench in sorted(pivoted_results.keys()):
+            writer.writerow(pivoted_results[bench])
 
     print(f"\nEvaluation complete. Master results saved to: {master_csv}")
 

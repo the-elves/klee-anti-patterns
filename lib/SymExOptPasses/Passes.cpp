@@ -10,6 +10,7 @@ class FunctionPass;
 }
 
 llvm::FunctionPass *createAntiFlatteningPass();
+llvm::ModulePass *createStructBlastingPass();
 
 namespace klee {
 
@@ -29,6 +30,10 @@ void applySymExOptPasses(llvm::Module &M,
       klee_message("Running anti-flattening symbolic execution optimization pass");
       PM.add(createAntiFlatteningPass());
       added = true;
+    } else if (passName == "struct-blasting") {
+      klee_message("Running struct-blasting symbolic execution optimization pass");
+      PM.add(createStructBlastingPass());
+      added = true;
     } else {
       klee_warning("Unknown symbolic execution optimization pass: %s",
                    passName.c_str());
@@ -43,7 +48,8 @@ void applySymExOptPasses(llvm::Module &M,
 void printSymExOptPasses() {
   llvm::outs() << "Available symbolic execution optimization passes:\n"
                << "  dummy-pass\n"
-               << "  anti-flattening\n";
+               << "  anti-flattening\n"
+               << "  struct-blasting\n";
 }
 
 } // namespace klee
