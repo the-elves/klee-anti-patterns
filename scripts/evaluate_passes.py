@@ -236,11 +236,16 @@ def main():
             all_configs.append((p_str, order))
 
     metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)", "Status"]
+    numeric_metrics = ["ICov(%)", "BCov(%)", "Paths", "Time(s)", "SolverTime(s)"]
+    baseline_config = ("none", "before")
     
     master_headers = ["Benchmark"]
     for p, o in all_configs:
         for m in metrics:
             master_headers.append(f"{p}_{o}_{m}")
+        # Add % change columns for numeric metrics
+        for m in numeric_metrics:
+            master_headers.append(f"{p}_{o}_{m}_%")
     
     # Pivot results: one row per benchmark
     pivoted_results = {}
@@ -253,6 +258,28 @@ def main():
         o = r["Order"]
         for m in metrics:
             pivoted_results[bench][f"{p}_{o}_{m}"] = r[m]
+
+    # Calculate % changes relative to baseline
+    for bench in pivoted_results:
+        row = pivoted_results[bench]
+        bp, bo = baseline_config
+        for p, o in all_configs:
+            for m in numeric_metrics:
+                col_name = f"{p}_{o}_{m}"
+                pct_col_name = f"{p}_{o}_{m}_%"
+                
+                val = row.get(col_name)
+                base_val = row.get(f"{bp}_{bo}_{m}")
+                
+                try:
+                    v = float(val)
+                    bv = float(base_val)
+                    if bv == 0:
+                        row[pct_col_name] = "0.0" if v == 0 else "inf"
+                    else:
+                        row[pct_col_name] = f"{(v - bv) / bv * 100:.2f}"
+                except (ValueError, TypeError, ZeroDivisionError):
+                    row[pct_col_name] = "N/A"
 
     with open(master_csv, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=master_headers)
