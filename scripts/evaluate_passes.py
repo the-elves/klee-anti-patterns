@@ -64,7 +64,7 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
     pass_str = ",".join(pass_combo) if pass_combo else "none"
     stats_csv = run_dir / "stats.csv"
     try:
-        # klee-stats --print-all --to-csv prints processed stats with ICov(%), BCov(%), etc.
+        # klee-stats --print-all --to-csv prints processed stats
         stats_cmd = ["klee-stats", "--print-all", "--to-csv", str(run_dir)]
         stats_proc = subprocess.run(stats_cmd, capture_output=True, text=True, check=True)
         stats_data = stats_proc.stdout
@@ -76,24 +76,38 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
             raise ValueError("klee-stats output too short")
             
         reader = csv.DictReader(lines)
-        # Skip the first row (sums) and get the actual data row
-        try:
-            next(reader) 
-            row = next(reader)
-        except StopIteration:
-            raise ValueError("klee-stats output has no data row")
+        rows = list(reader)
+        if not rows:
+            raise ValueError("klee-stats output has no data")
+
+        # When running on a single directory, klee-stats might only return one row 
+        # (which is both the directory stats and the total).
+        # Usually it's: Row 0 = Total, Row 1 = Directory 1, ...
+        # If there's only one directory, we take the last row.
+        row = rows[-1]
         
         # Calculate percentages
         try:
-            icov = (float(row.get("CoveredInstructions", 0)) / float(row.get("Instructions", 1))) * 100
+            covered_insts = float(row.get("CoveredInstructions", 0))
+            uncovered_insts = float(row.get("UncoveredInstructions", 0))
+            total_static_insts = covered_insts + uncovered_insts
+            icov = (covered_insts / total_static_insts * 100) if total_static_insts > 0 else 0.0
         except:
             icov = 0.0
         
         try:
             total_branches = float(row.get("NumBranches", 1))
-            bcov = (float(row.get("FullBranches", 0)) / total_branches) * 100
+            full_branches = float(row.get("FullBranches", 0))
+            partial_branches = float(row.get("PartialBranches", 0))
+            bcov = ((full_branches + 0.5 * partial_branches) / total_branches * 100) if total_branches > 0 else 0.0
         except:
             bcov = 0.0
+
+        def to_seconds(val):
+            try:
+                return f"{float(val) / 1000000.0:.2f}"
+            except:
+                return "0.00"
 
         return {
             "Benchmark": bench_name,
@@ -101,9 +115,9 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
             "Order": order,
             "ICov(%)": f"{icov:.2f}",
             "BCov(%)": f"{bcov:.2f}",
-            "Paths": row.get("TerminationExit", row.get("Paths", "0")),
-            "Time(s)": row.get("Time(s)", row.get("WallTime", "0.0")),
-            "SolverTime(s)": row.get("SolverTime", "0.0"),
+            "Paths": row.get("TerminationExit", "0"),
+            "Time(s)": to_seconds(row.get("WallTime", 0)),
+            "SolverTime(s)": to_seconds(row.get("SolverTime", 0)),
             "Status": status
         }
     except Exception as e:

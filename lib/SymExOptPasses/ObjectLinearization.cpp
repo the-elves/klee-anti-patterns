@@ -17,10 +17,11 @@ using namespace llvm;
 
 namespace {
 struct ObjectInfo {
-  Value *OriginalValue;
+  GlobalVariable *GV;
   Type *AllocatedType;
   uint64_t Size;
   uint64_t Offset;
+  unsigned FieldIndex;
 };
 
 struct ObjectLinearizationPass : public ModulePass {
@@ -31,6 +32,8 @@ struct ObjectLinearizationPass : public ModulePass {
     const DataLayout &DL = M.getDataLayout();
     std::vector<ObjectInfo> Objects;
     uint64_t TotalSize = 0;
+    std::vector<Type *> FieldTypes;
+    std::vector<Constant *> Initializers;
 
     auto IsUsedInKleeMakeSymbolic = [](Value *V) {
       std::vector<User *> Worklist(V->user_begin(), V->user_end());
@@ -65,7 +68,7 @@ struct ObjectLinearizationPass : public ModulePass {
         continue;
       if (GV.getName().starts_with("klee") || GV.getName().starts_with("__klee"))
         continue;
-      
+
       Type *Ty = GV.getValueType();
       if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy()))
         continue;
@@ -73,55 +76,29 @@ struct ObjectLinearizationPass : public ModulePass {
       if (IsUsedInKleeMakeSymbolic(&GV))
         continue;
 
-      uint64_t Size = DL.getTypeAllocSize(Ty);
-      if (Size == 0) continue;
-
-      uint64_t Align = DL.getABITypeAlign(Ty).value();
-      TotalSize = (TotalSize + Align - 1) & ~(Align - 1);
-
-      Objects.push_back({&GV, Ty, Size, TotalSize});
-      TotalSize += Size;
-    }
-
-    // 2. Collect static AllocaInsts
-    for (Function &F : M) {
-      if (F.isDeclaration()) continue;
-      if (F.empty()) continue;
-      
-      BasicBlock &Entry = F.getEntryBlock();
-      for (Instruction &I : Entry) {
-        if (auto *AI = dyn_cast<AllocaInst>(&I)) {
-          if (AI->isStaticAlloca()) {
-            Type *Ty = AI->getAllocatedType();
-            if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy()))
-              continue;
-
-            if (IsUsedInKleeMakeSymbolic(AI))
-              continue;
-
-            uint64_t Size = DL.getTypeAllocSize(Ty);
-            if (Size == 0) continue;
-
-            uint64_t Align = DL.getABITypeAlign(Ty).value();
-            TotalSize = (TotalSize + Align - 1) & ~(Align - 1);
-
-            Objects.push_back({AI, Ty, Size, TotalSize});
-            TotalSize += Size;
-          }
-        }
-      }
+      FieldTypes.push_back(Ty);
+      Initializers.push_back(GV.getInitializer());
+      Objects.push_back({&GV, Ty, 0, 0, (unsigned)FieldTypes.size() - 1});
     }
 
     if (Objects.empty()) return false;
 
+    LLVMContext &Ctx = M.getContext();
+    StructType *LinearMemTy = StructType::get(Ctx, FieldTypes, false);
+    const StructLayout *SL = DL.getStructLayout(LinearMemTy);
+    TotalSize = SL->getSizeInBytes();
+
+    for (auto &Info : Objects) {
+      Info.Size = DL.getTypeAllocSize(Info.AllocatedType);
+      Info.Offset = SL->getElementOffset(Info.FieldIndex);
+    }
+
     klee::klee_message("Object-linearization: Linearizing %zu objects into %lu bytes",
                        Objects.size(), TotalSize);
 
-    LLVMContext &Ctx = M.getContext();
-    ArrayType *LinearMemTy = ArrayType::get(Type::getInt8Ty(Ctx), TotalSize);
     GlobalVariable *LinearMem = new GlobalVariable(
-        M, LinearMemTy, false, GlobalValue::ExternalLinkage,
-        ConstantAggregateZero::get(LinearMemTy), "__klee_linear_memory");
+        M, LinearMemTy, false, GlobalValue::InternalLinkage,
+        ConstantStruct::get(LinearMemTy, Initializers), "__klee_linear_memory");
 
     uint64_t MaxAlign = 1;
     for (const auto &Info : Objects) {
@@ -146,28 +123,18 @@ struct ObjectLinearizationPass : public ModulePass {
     };
 
     for (const auto &Info : Objects) {
-      Value *OrigVal = Info.OriginalValue;
+      GlobalVariable *OrigVal = Info.GV;
       uint64_t Offset = Info.Offset;
       uint64_t ObjSize = Info.Size;
 
       IRBuilder<> Builder(Ctx);
       Value *Replacement = nullptr;
 
-      if (auto *GV = dyn_cast<GlobalVariable>(OrigVal)) {
-        std::vector<Value *> Indices = {
-            ConstantInt::get(Type::getInt64Ty(Ctx), 0),
-            ConstantInt::get(Type::getInt64Ty(Ctx), Offset)};
-        Constant *GEP = ConstantExpr::getGetElementPtr(LinearMemTy, LinearMem, Indices);
-        Replacement = ConstantExpr::getBitCast(GEP, GV->getType());
-      } else if (auto *AI = dyn_cast<AllocaInst>(OrigVal)) {
-        Builder.SetInsertPoint(AI);
-        Builder.SetCurrentDebugLocation(AI->getDebugLoc());
-        std::vector<Value *> Indices = {
-            ConstantInt::get(Type::getInt64Ty(Ctx), 0),
-            ConstantInt::get(Type::getInt64Ty(Ctx), Offset)};
-        Value *GEP = Builder.CreateInBoundsGEP(LinearMemTy, LinearMem, Indices);
-        Replacement = Builder.CreateBitCast(GEP, AI->getType());
-      }
+      std::vector<Value *> Indices = {
+          ConstantInt::get(Type::getInt64Ty(Ctx), 0),
+          ConstantInt::get(Type::getInt32Ty(Ctx), Info.FieldIndex)};
+      Constant *GEP = ConstantExpr::getGetElementPtr(LinearMemTy, LinearMem, Indices);
+      Replacement = ConstantExpr::getBitCast(GEP, OrigVal->getType());
 
       if (!Replacement) continue;
 
@@ -224,7 +191,7 @@ struct ObjectLinearizationPass : public ModulePass {
               AllocaInst *Tmp = EntryBuilder.CreateAlloca(Info.AllocatedType, nullptr, "linear.rebuild." + OrigVal->getName());
               Tmp->setAlignment(DL.getABITypeAlign(Info.AllocatedType));
 
-              Builder.CreateMemCpy(Tmp, Tmp->getAlign(), Replacement, Replacement->getPointerAlignment(DL), ObjSize);
+              Builder.CreateMemCpy(Tmp, Tmp->getAlign(), Replacement, MaybeAlign(DL.getABITypeAlign(Info.AllocatedType)), ObjSize);
 
               for (unsigned j=0; j<CB->arg_size(); ++j) {
                 if (Value *Off = GetPointerOffset(CB->getArgOperand(j), OrigVal)) {
@@ -239,12 +206,12 @@ struct ObjectLinearizationPass : public ModulePass {
                 if (!CI->doesNotReturn() && !CI->isTerminator()) {
                   Builder.SetInsertPoint(CI->getNextNode());
                   Builder.SetCurrentDebugLocation(CI->getDebugLoc());
-                  Builder.CreateMemCpy(Replacement, Replacement->getPointerAlignment(DL), Tmp, Tmp->getAlign(), ObjSize);
+                  Builder.CreateMemCpy(Replacement, MaybeAlign(DL.getABITypeAlign(Info.AllocatedType)), Tmp, Tmp->getAlign(), ObjSize);
                 }
               } else if (auto *II = dyn_cast<InvokeInst>(CB)) {
                 Builder.SetInsertPoint(&II->getNormalDest()->front());
                 Builder.SetCurrentDebugLocation(II->getDebugLoc());
-                Builder.CreateMemCpy(Replacement, Replacement->getPointerAlignment(DL), Tmp, Tmp->getAlign(), ObjSize);
+                Builder.CreateMemCpy(Replacement, MaybeAlign(DL.getABITypeAlign(Info.AllocatedType)), Tmp, Tmp->getAlign(), ObjSize);
               }
             }
           }
@@ -281,12 +248,11 @@ struct ObjectLinearizationPass : public ModulePass {
                 CurrentTy = NextTy;
               }
             }
-          }
- else {
+          } else {
             ByteOffset = ConstantInt::get(Type::getInt64Ty(Ctx), 0);
           }
         }
-        
+
         if (ByteOffset) {
           Value *Cond = Builder.CreateICmpUGE(ByteOffset, ConstantInt::get(Type::getInt64Ty(Ctx), ObjSize));
           Instruction *ThenTerm = SplitBlockAndInsertIfThen(Cond, I, true);
@@ -301,11 +267,7 @@ struct ObjectLinearizationPass : public ModulePass {
       }
 
       OrigVal->replaceAllUsesWith(Replacement);
-      if (auto *I = dyn_cast<Instruction>(OrigVal)) {
-        I->eraseFromParent();
-      } else if (auto *GV = dyn_cast<GlobalVariable>(OrigVal)) {
-        GV->eraseFromParent();
-      }
+      OrigVal->eraseFromParent();
     }
     return true;
   }
