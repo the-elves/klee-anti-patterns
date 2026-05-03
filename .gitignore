@@ -33,3 +33,4 @@ autom4te.cache/
 skills/*
 **/klee-out*/**
 **/klee-last**
+__tmp__
