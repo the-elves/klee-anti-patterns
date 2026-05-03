@@ -59,7 +59,7 @@ struct ObjectLinearizationPass : public ModulePass {
         continue;
       
       Type *Ty = GV.getValueType();
-      if (!Ty->isStructTy() && !Ty->isArrayTy())
+      if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy()))
         continue;
 
       if (IsUsedInKleeMakeSymbolic(&GV))
@@ -82,7 +82,7 @@ struct ObjectLinearizationPass : public ModulePass {
         if (auto *AI = dyn_cast<AllocaInst>(&I)) {
           if (AI->isStaticAlloca()) {
             Type *Ty = AI->getAllocatedType();
-            if (!Ty->isStructTy() && !Ty->isArrayTy())
+            if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy()))
               continue;
 
             if (IsUsedInKleeMakeSymbolic(AI))
@@ -177,6 +177,8 @@ struct ObjectLinearizationPass : public ModulePass {
         if (Ptr) {
           if (auto *GEP = dyn_cast<GetElementPtrInst>(Ptr)) {
             Type *CurrentTy = GEP->getSourceElementType();
+            if (!CurrentTy->isSized()) continue;
+
             auto It = GEP->idx_begin();
             Value *Idx0 = *It++;
             uint64_t srcSize = DL.getTypeAllocSize(CurrentTy);
@@ -192,6 +194,10 @@ struct ObjectLinearizationPass : public ModulePass {
                 CurrentTy = ST->getElementType(fieldIdx);
               } else {
                 Type *NextTy = GetElementPtrInst::getTypeAtIndex(CurrentTy, Idx);
+                if (!NextTy->isSized()) {
+                  ByteOffset = nullptr;
+                  break;
+                }
                 uint64_t elemSize = DL.getTypeAllocSize(NextTy);
                 Value *idx64 = Builder.CreateZExtOrTrunc(Idx, Type::getInt64Ty(Ctx));
                 Value *offset = Builder.CreateMul(idx64, ConstantInt::get(Type::getInt64Ty(Ctx), elemSize));

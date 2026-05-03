@@ -64,8 +64,8 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
     pass_str = ",".join(pass_combo) if pass_combo else "none"
     stats_csv = run_dir / "stats.csv"
     try:
-        # klee-stats --table-format=csv prints processed stats with ICov(%), BCov(%), etc.
-        stats_cmd = ["klee-stats", "--print-all", "--table-format=csv", str(run_dir)]
+        # klee-stats --print-all --to-csv prints processed stats with ICov(%), BCov(%), etc.
+        stats_cmd = ["klee-stats", "--print-all", "--to-csv", str(run_dir)]
         stats_proc = subprocess.run(stats_cmd, capture_output=True, text=True, check=True)
         stats_data = stats_proc.stdout
         with open(stats_csv, "w") as f:
@@ -76,17 +76,31 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
             raise ValueError("klee-stats output too short")
             
         reader = csv.DictReader(lines)
+        # Skip the first row (sums) and get the actual data row
+        next(reader) 
         row = next(reader)
         
+        # Calculate percentages
+        try:
+            icov = (float(row.get("CoveredInstructions", 0)) / float(row.get("Instructions", 1))) * 100
+        except:
+            icov = 0.0
+        
+        try:
+            total_branches = float(row.get("NumBranches", 1))
+            bcov = (float(row.get("FullBranches", 0)) / total_branches) * 100
+        except:
+            bcov = 0.0
+
         return {
             "Benchmark": bench_name,
             "Passes": pass_str,
             "Order": order,
-            "ICov(%)": row.get("ICov(%)", "0.0"),
-            "BCov(%)": row.get("BCov(%)", "0.0"),
-            "Paths": row.get("TermExit", row.get("Paths", "0")),
-            "Time(s)": row.get("Time(s)", "0.0"),
-            "SolverTime(s)": row.get("TSolver(s)", row.get("SolverTime(s)", "0.0")),
+            "ICov(%)": f"{icov:.2f}",
+            "BCov(%)": f"{bcov:.2f}",
+            "Paths": row.get("TerminationExit", row.get("Paths", "0")),
+            "Time(s)": row.get("Time(s)", row.get("WallTime", "0.0")),
+            "SolverTime(s)": row.get("SolverTime", "0.0"),
             "Status": status
         }
     except Exception as e:
@@ -111,9 +125,10 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
     
     transformed_bc_dir = out_root / "transformed_bitcodes"
 
-    cmd = [c for c in BASE_KLEE_COMMAND if not c.startswith("--max-time=")]
+    cmd = [c for c in BASE_KLEE_COMMAND if not c.startswith("--max-time=") and not c.startswith("--env-file=")]
     cmd.append(f"--max-time={max_time}")
     cmd.append(f"--output-dir={run_dir}")
+    cmd.append(f"--env-file={out_root / 'test.env'}")
     
     if pass_combo:
         cmd.append(f"--symex-opts={','.join(pass_combo)}")
