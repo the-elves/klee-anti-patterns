@@ -188,12 +188,10 @@ def create_environment(out_dir: Path, assets_path:Path):
         return
     shutil.copy(assets_path/"testing-env.sh", out_dir)
     shutil.copy(assets_path/"sandbox.tgz", "/tmp")
-    curr_dir = os.getcwd()
     os.chdir("/tmp")
     subprocess.run(["tar", "xfv", "sandbox.tgz"])
     os.chdir(out_dir)
     subprocess.run("env -i /bin/bash -c".split(" ")+["(source testing-env.sh; env >test.env)"])
-    os.chdir(curr_dir)
 
 def aggregate_results(results, out_root):
     # Unpivoted Results
