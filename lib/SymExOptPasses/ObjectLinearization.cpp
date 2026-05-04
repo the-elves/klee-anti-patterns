@@ -258,7 +258,7 @@ struct ObjectLinearizationPass : public ModulePass {
       }
 
       klee::klee_message("Object-linearization: Linearizing %zu global objects into %lu bytes",
-                         GlobalObjects.size(), (uint64_t)SL->getSizeInBytes().getFixedValue());
+                         GlobalObjects.size(), (uint64_t)SL->getSizeInBytes());
 
       GlobalVariable *LinearMem = new GlobalVariable(
           M, LinearMemTy, false, GlobalValue::InternalLinkage,
@@ -324,7 +324,7 @@ struct ObjectLinearizationPass : public ModulePass {
       }
 
       klee::klee_message("Object-linearization: Linearizing %zu local objects in %s into %lu bytes",
-                         LocalObjects.size(), F.getName().str().c_str(), (uint64_t)SL->getSizeInBytes().getFixedValue());
+                         LocalObjects.size(), F.getName().str().c_str(), (uint64_t)SL->getSizeInBytes());
 
       IRBuilder<> EntryBuilder(&Entry, Entry.begin());
       AllocaInst *LocalLinearMem = EntryBuilder.CreateAlloca(LocalLinearMemTy, nullptr, "__klee_local_linear_memory");

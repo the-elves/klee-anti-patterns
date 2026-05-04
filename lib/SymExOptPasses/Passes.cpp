@@ -1,5 +1,7 @@
 #include "klee/SymExOptPasses/Passes.h"
 #include "klee/Support/ErrorHandling.h"
+#include "llvm/CodeGen/IntrinsicLowering.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Pass.h"
@@ -47,6 +49,28 @@ void applySymExOptPasses(llvm::Module &M,
 
   if (added) {
     PM.run(M);
+
+    // Lower intrinsics introduced by the passes (e.g., llvm.memcpy)
+    // as they might be run after KLEE's own IntrinsicCleanerPass.
+    llvm::IntrinsicLowering IL(M.getDataLayout());
+    for (auto &F : M) {
+      for (auto &BB : F) {
+        for (auto I = BB.begin(); I != BB.end();) {
+          llvm::Instruction *Inst = &*I++;
+          if (auto *II = llvm::dyn_cast<llvm::IntrinsicInst>(Inst)) {
+            switch (II->getIntrinsicID()) {
+            case llvm::Intrinsic::memcpy:
+            case llvm::Intrinsic::memmove:
+            case llvm::Intrinsic::memset:
+              IL.LowerIntrinsicCall(II);
+              break;
+            default:
+              break;
+            }
+          }
+        }
+      }
+    }
   }
 }
 

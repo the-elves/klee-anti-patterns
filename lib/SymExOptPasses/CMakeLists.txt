@@ -21,6 +21,7 @@ llvm_config(kleeSymExOptPasses "${USE_LLVM_SHARED}"
   support
   irreader
   analysis
+  codegen
   )
 
 target_link_libraries(kleeSymExOptPasses PRIVATE
