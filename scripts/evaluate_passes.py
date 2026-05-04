@@ -337,7 +337,7 @@ def main():
     run_parser.add_argument("--passes", nargs="+", required=True, help="Names of optimization passes")
     run_parser.add_argument("--out-dir", help="Output root directory")
     run_parser.add_argument("--permute-all", action="store_true", help="Run all combinations of passes")
-    run_parser.add_argument("--both-before-after", action="store_true", help="Run passes both before and after KLEE opts")
+    run_parser.add_argument("--order", choices=["before", "after"], default="before", help="When to run the passes (default: before)")
     run_parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
     run_parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
     run_parser.add_argument("--max-time", default="60min", help="Max time for KLEE (e.g., 60s, 1h, 60mins)")
@@ -380,9 +380,7 @@ def main():
     # Add a baseline run with no passes
     pass_combos.insert(0, tuple())
 
-    orders = ["before"]
-    if args.both_before_after:
-        orders.append("after")
+    orders = [args.order]
 
     tasks = []
     for bc_file in bc_files:
