@@ -12,6 +12,7 @@ add_library(kleeSymExOptPasses
   AntiFlattening.cpp
   StructBlasting.cpp
   ObjectLinearization.cpp
+  MulToShift.cpp
 )
 
 llvm_config(kleeSymExOptPasses "${USE_LLVM_SHARED}"
