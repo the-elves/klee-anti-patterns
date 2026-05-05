@@ -16,6 +16,9 @@ llvm::ModulePass *createStructBlastingPass();
 llvm::ModulePass *createObjectLinearizationPass();
 llvm::ModulePass *createHeapObjectLinearizationPass();
 llvm::FunctionPass *createMulToShiftPass();
+namespace klee {
+llvm::ModulePass *createBranchPruningPass();
+}
 
 namespace klee {
 
@@ -43,13 +46,19 @@ void applySymExOptPasses(llvm::Module &M,
       klee_message("Running object-linearization symbolic execution optimization pass");
       PM.add(createObjectLinearizationPass());
       added = true;
+    /*
     } else if (passName == "heap-object-linearization") {
       klee_message("Running heap-object-linearization symbolic execution optimization pass");
       PM.add(createHeapObjectLinearizationPass());
       added = true;
+    */
     } else if (passName == "mul-to-shift") {
       klee_message("Running mul-to-shift symbolic execution optimization pass");
       PM.add(createMulToShiftPass());
+      added = true;
+    } else if (passName == "branch-pruning") {
+      klee_message("Running branch-pruning symbolic execution optimization pass");
+      PM.add(createBranchPruningPass());
       added = true;
     } else {
       klee_warning("Unknown symbolic execution optimization pass: %s",
@@ -90,8 +99,9 @@ void printSymExOptPasses() {
                << "  anti-flattening\n"
                << "  struct-blasting\n"
                << "  object-linearization\n"
-               << "  heap-object-linearization\n"
-               << "  mul-to-shift\n";
+               // << "  heap-object-linearization\n"
+               << "  mul-to-shift\n"
+               << "  branch-pruning\n";
 }
 
 } // namespace klee
