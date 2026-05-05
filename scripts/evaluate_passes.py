@@ -133,7 +133,7 @@ def get_stats(run_dir, bench_name, pass_combo, order, status):
             "Status": f"Stats Error: {str(e)}"
         }
 
-def run_klee(bc_path, pass_combo, order, out_root, max_time):
+def run_klee(bc_path, pass_combo, order, out_root, max_time, override_args):
     bench_name = bc_path.stem
     pass_str = "_".join(pass_combo) if pass_combo else "none"
     run_name = f"{pass_str}_{order}"
@@ -154,8 +154,11 @@ def run_klee(bc_path, pass_combo, order, out_root, max_time):
         cmd.append("--symex-opts-after-klee")
     
     cmd.append(str(bc_path))
-    cmd.extend(KLEE_ARGS_POST)
-
+    if override_args:
+        cmd.extend(override_args.split(" "))
+    else:
+        cmd.extend(KLEE_ARGS_POST)
+    #print(" ".join(cmd))
     # Run KLEE
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -341,7 +344,7 @@ def main():
     run_parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
     run_parser.add_argument("--assets-dir", type=Path, default=Path(Path.home()/"Workspace/klee/assets"))
     run_parser.add_argument("--max-time", default="60min", help="Max time for KLEE (e.g., 60s, 1h, 60mins)")
-
+    run_parser.add_argument("--override-target-args", default=None, help="Args to pass to the target")
     # Collect command
     collect_parser = subparsers.add_parser("collect", help="Collect stats from an existing output folder")
     collect_parser.add_argument("--out-dir", required=True, help="Output root directory to collect from")
@@ -386,7 +389,7 @@ def main():
     for bc_file in bc_files:
         for combo in pass_combos:
             for order in orders:
-                tasks.append((bc_file, combo, order, out_root, args.max_time))
+                tasks.append((bc_file, combo, order, out_root, args.max_time, args.override_target_args))
 
     results = []
     print(f"Starting {len(tasks)} tasks with {args.jobs} parallel jobs...")
