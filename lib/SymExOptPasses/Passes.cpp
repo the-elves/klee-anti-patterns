@@ -12,6 +12,7 @@ class FunctionPass;
 }
 
 llvm::FunctionPass *createAntiFlatteningPass();
+llvm::FunctionPass *createLowerBitWidthsPass();
 llvm::ModulePass *createStructBlastingPass();
 llvm::ModulePass *createObjectLinearizationPass();
 llvm::ModulePass *createHeapObjectLinearizationPass();
@@ -37,6 +38,10 @@ void applySymExOptPasses(llvm::Module &M,
     } else if (passName == "anti-flattening") {
       klee_message("Running anti-flattening symbolic execution optimization pass");
       PM.add(createAntiFlatteningPass());
+      added = true;
+    } else if (passName == "lower-bitwidths") {
+      klee_message("Running lower-bitwidths symbolic execution optimization pass");
+      PM.add(createLowerBitWidthsPass());
       added = true;
     } else if (passName == "struct-blasting") {
       klee_message("Running struct-blasting symbolic execution optimization pass");
@@ -97,6 +102,7 @@ void printSymExOptPasses() {
   llvm::outs() << "Available symbolic execution optimization passes:\n"
                << "  dummy-pass\n"
                << "  anti-flattening\n"
+               << "  lower-bitwidths\n"
                << "  struct-blasting\n"
                << "  object-linearization\n"
                // << "  heap-object-linearization\n"

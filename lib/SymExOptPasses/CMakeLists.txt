@@ -10,6 +10,7 @@
 add_library(kleeSymExOptPasses
   Passes.cpp
   AntiFlattening.cpp
+  LowerBitWidths.cpp
   StructBlasting.cpp
   ObjectLinearization.cpp
   HeapObjectLinearization.cpp
