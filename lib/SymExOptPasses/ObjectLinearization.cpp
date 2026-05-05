@@ -10,6 +10,9 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/Analysis/LazyValueInfo.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/InitializePasses.h"
 #include <map>
 #include <set>
 #include <vector>
@@ -27,7 +30,15 @@ struct ObjectInfo {
 
 struct ObjectLinearizationPass : public ModulePass {
   static char ID;
-  ObjectLinearizationPass() : ModulePass(ID) {}
+  ObjectLinearizationPass() : ModulePass(ID) {
+    PassRegistry &Registry = *PassRegistry::getPassRegistry();
+    initializeLazyValueInfoWrapperPassPass(Registry);
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<LazyValueInfoWrapperPass>();
+    ModulePass::getAnalysisUsage(AU);
+  }
 
   bool runOnModule(Module &M) override {
     const DataLayout &DL = M.getDataLayout();
@@ -46,8 +57,6 @@ struct ObjectLinearizationPass : public ModulePass {
             Dir.contains("build/runtime") || File.contains("build/runtime")) {
           return true;
         }
-      } else {
-        return true;
       }
       return false;
     };
@@ -229,6 +238,85 @@ struct ObjectLinearizationPass : public ModulePass {
       else if (auto *GV = dyn_cast<GlobalVariable>(OrigVal)) GV->eraseFromParent();
     };
 
+    // Identify all candidate objects (Globals and Allocas)
+    std::vector<Value *> CandidateObjects;
+    for (GlobalVariable &GV : M.globals()) {
+      if (GV.isDeclaration() || GV.isConstant()) continue;
+      if (!GV.hasLocalLinkage()) continue;
+      if (GV.getName().starts_with("klee") || GV.getName().starts_with("__klee")) continue;
+      Type *Ty = GV.getValueType();
+      if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy())) continue;
+      if (IsUsedInKleeMakeSymbolic(&GV)) continue;
+      CandidateObjects.push_back(&GV);
+    }
+    for (Function &F : M) {
+      if (F.isDeclaration() || F.empty()) continue;
+      if (isLinkedFunction(&F)) continue;
+      for (Instruction &I : F.getEntryBlock()) {
+        if (auto *AI = dyn_cast<AllocaInst>(&I)) {
+          if (AI->isStaticAlloca()) {
+            Type *Ty = AI->getAllocatedType();
+            if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy())) continue;
+            if (IsUsedInKleeMakeSymbolic(AI)) continue;
+            CandidateObjects.push_back(AI);
+          }
+        }
+      }
+    }
+
+    // Identify which candidate objects are actually aliased using LazyValueInfo
+    std::set<Value *> AliasedObjects;
+    for (Function &F : M) {
+      if (F.isDeclaration() || F.empty()) continue;
+      if (isLinkedFunction(&F)) continue;
+
+      LazyValueInfo &LVI = getAnalysis<LazyValueInfoWrapperPass>(F).getLVI();
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          std::vector<Value *> Ptrs;
+          if (I.getType()->isPointerTy()) Ptrs.push_back(&I);
+          if (auto *LI = dyn_cast<LoadInst>(&I)) Ptrs.push_back(LI->getPointerOperand());
+          if (auto *SI = dyn_cast<StoreInst>(&I)) Ptrs.push_back(SI->getPointerOperand());
+          
+          if (auto *CB = dyn_cast<CallBase>(&I)) {
+              for (unsigned i = 0; i < CB->arg_size(); ++i) {
+                  Value *Arg = CB->getArgOperand(i);
+                  if (Arg->getType()->isPointerTy()) Ptrs.push_back(Arg);
+              }
+          }
+
+          for (Value *Ptr : Ptrs) {
+              Value *U = getUnderlyingObject(Ptr);
+              bool isCandidate = std::find(CandidateObjects.begin(), CandidateObjects.end(), U) != CandidateObjects.end();
+              
+              for (Value *C : CandidateObjects) {
+                  if (C == U || C == Ptr) continue;
+                  
+                  // If U and C are both distinct base objects, they cannot alias.
+                  if (U && (isa<GlobalVariable>(U) || isa<AllocaInst>(U)) &&
+                      (isa<GlobalVariable>(C) || isa<AllocaInst>(C)) &&
+                      U != C) {
+                      continue;
+                  }
+
+                  // Use LVI to check if Ptr could possibly equal C.
+                  Constant *ResEQ = LVI.getPredicateAt(ICmpInst::ICMP_EQ, Ptr, C, &I, true);
+                  if (ResEQ && ResEQ->isZeroValue()) continue;
+
+                  Constant *ResNE = LVI.getPredicateAt(ICmpInst::ICMP_NE, Ptr, C, &I, true);
+                  if (ResNE && ResNE->isOneValue()) continue;
+
+                  AliasedObjects.insert(C);
+                  if (isCandidate) AliasedObjects.insert(U);
+              }
+          }
+        }
+      }
+    }
+
+    if (AliasedObjects.empty()) return false;
+
+
     // 1. Global Objects Linearization
     std::vector<ObjectInfo> GlobalObjects;
     std::vector<Type *> GlobalFieldTypes;
@@ -242,6 +330,7 @@ struct ObjectLinearizationPass : public ModulePass {
       Type *Ty = GV.getValueType();
       if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy())) continue;
       if (IsUsedInKleeMakeSymbolic(&GV)) continue;
+      if (AliasedObjects.find(&GV) == AliasedObjects.end()) continue;
 
       GlobalFieldTypes.push_back(Ty);
       GlobalInitializers.push_back(GV.getInitializer());
@@ -307,6 +396,7 @@ struct ObjectLinearizationPass : public ModulePass {
           Type *Ty = AI->getAllocatedType();
           if (!Ty->isSized() || (!Ty->isStructTy() && !Ty->isArrayTy())) continue;
           if (IsUsedInKleeMakeSymbolic(AI)) continue;
+          if (AliasedObjects.find(AI) == AliasedObjects.end()) continue;
 
           LocalFieldTypes.push_back(Ty);
           LocalObjects.push_back({AI, Ty, 0, 0, (unsigned)LocalFieldTypes.size() - 1});
