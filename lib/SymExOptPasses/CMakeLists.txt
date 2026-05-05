@@ -12,6 +12,7 @@ add_library(kleeSymExOptPasses
   AntiFlattening.cpp
   StructBlasting.cpp
   ObjectLinearization.cpp
+  HeapObjectLinearization.cpp
   MulToShift.cpp
 )
 

@@ -14,6 +14,7 @@ class FunctionPass;
 llvm::FunctionPass *createAntiFlatteningPass();
 llvm::ModulePass *createStructBlastingPass();
 llvm::ModulePass *createObjectLinearizationPass();
+llvm::ModulePass *createHeapObjectLinearizationPass();
 llvm::FunctionPass *createMulToShiftPass();
 
 namespace klee {
@@ -41,6 +42,10 @@ void applySymExOptPasses(llvm::Module &M,
     } else if (passName == "object-linearization") {
       klee_message("Running object-linearization symbolic execution optimization pass");
       PM.add(createObjectLinearizationPass());
+      added = true;
+    } else if (passName == "heap-object-linearization") {
+      klee_message("Running heap-object-linearization symbolic execution optimization pass");
+      PM.add(createHeapObjectLinearizationPass());
       added = true;
     } else if (passName == "mul-to-shift") {
       klee_message("Running mul-to-shift symbolic execution optimization pass");
@@ -85,6 +90,7 @@ void printSymExOptPasses() {
                << "  anti-flattening\n"
                << "  struct-blasting\n"
                << "  object-linearization\n"
+               << "  heap-object-linearization\n"
                << "  mul-to-shift\n";
 }
 
