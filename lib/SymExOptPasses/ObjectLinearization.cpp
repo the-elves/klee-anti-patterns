@@ -10,6 +10,7 @@
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/ConstantRange.h"
 #include "llvm/Analysis/LazyValueInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/InitializePasses.h"
@@ -299,12 +300,13 @@ struct ObjectLinearizationPass : public ModulePass {
                       continue;
                   }
 
-                  // Use LVI to check if Ptr could possibly equal C.
-                  Constant *ResEQ = LVI.getPredicateAt(ICmpInst::ICMP_EQ, Ptr, C, &I, true);
-                  if (ResEQ && ResEQ->isZeroValue()) continue;
+                  // Use LVI to check if Ptr could possibly equal C using ranges.
+                  ConstantRange RangePtr = LVI.getConstantRange(Ptr, &I, true);
+                  ConstantRange RangeC = LVI.getConstantRange(C, &I, true);
 
-                  Constant *ResNE = LVI.getPredicateAt(ICmpInst::ICMP_NE, Ptr, C, &I, true);
-                  if (ResNE && ResNE->isOneValue()) continue;
+                  if (RangePtr.intersectWith(RangeC).isEmptySet()) {
+                      continue;
+                  }
 
                   AliasedObjects.insert(C);
                   if (isCandidate) AliasedObjects.insert(U);
