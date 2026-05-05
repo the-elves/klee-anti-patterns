@@ -16,6 +16,7 @@ add_library(kleeSymExOptPasses
   HeapObjectLinearization.cpp
   MulToShift.cpp
   BranchPruning.cpp
+  ValueRangeLowering.cpp
 )
 
 llvm_config(kleeSymExOptPasses "${USE_LLVM_SHARED}"

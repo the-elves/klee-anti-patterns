@@ -17,6 +17,7 @@ llvm::ModulePass *createStructBlastingPass();
 llvm::ModulePass *createObjectLinearizationPass();
 llvm::ModulePass *createHeapObjectLinearizationPass();
 llvm::FunctionPass *createMulToShiftPass();
+llvm::FunctionPass *createValueRangeLoweringPass();
 namespace klee {
 llvm::ModulePass *createBranchPruningPass();
 }
@@ -65,6 +66,10 @@ void applySymExOptPasses(llvm::Module &M,
       klee_message("Running branch-pruning symbolic execution optimization pass");
       PM.add(createBranchPruningPass());
       added = true;
+    } else if (passName == "range-lowering") {
+      klee_message("Running range-lowering symbolic execution optimization pass");
+      PM.add(createValueRangeLoweringPass());
+      added = true;
     } else {
       klee_warning("Unknown symbolic execution optimization pass: %s",
                    passName.c_str());
@@ -107,7 +112,8 @@ void printSymExOptPasses() {
                << "  object-linearization\n"
                // << "  heap-object-linearization\n"
                << "  mul-to-shift\n"
-               << "  branch-pruning\n";
+               << "  branch-pruning\n"
+               << "  range-lowering\n";
 }
 
 } // namespace klee
