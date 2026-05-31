@@ -17,11 +17,11 @@
 #include "llvm/ADT/ArrayRef.h"
 
 #include <map>
-#include <memory>
 #include <set>
 #include <vector>
 
 namespace llvm {
+
   class BasicBlock;
   class Constant;
   class Function;
@@ -40,6 +40,12 @@ namespace klee {
   class KModule;
   template<class T> class ref;
 
+  struct KLoop {
+    llvm::BasicBlock *header;
+    std::vector<llvm::BasicBlock *> body;
+    std::vector<llvm::BasicBlock *> exits;
+  };
+
   struct KFunction : public KCallable {
     llvm::Function *function;
 
@@ -49,6 +55,8 @@ namespace klee {
     KInstruction **instructions;
 
     std::map<llvm::BasicBlock*, unsigned> basicBlockEntry;
+    std::set<llvm::BasicBlock*> loopHeaders;
+    std::map<llvm::BasicBlock*, KLoop> loops;
 
     /// Whether instructions in this function should count as
     /// "coverable" for statistics and search heuristics.

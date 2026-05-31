@@ -30,6 +30,8 @@ DISABLE_WARNING_PUSH
 DISABLE_WARNING_DEPRECATED_DECLARATIONS
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/Analysis/LoopInfo.h"
+#include "llvm/IR/Dominators.h"
 DISABLE_WARNING_POP
 
 #include <sstream>
@@ -383,6 +385,36 @@ KFunction::KFunction(llvm::Function *_function,
       }
 
       instructions[i++] = ki;
+    }
+  }
+
+  if (!function->isDeclaration()) {
+    DominatorTree DT(*function);
+    LoopInfo LI(DT);
+    for (auto *L : LI) {
+      std::vector<Loop *> worklist;
+      worklist.push_back(L);
+      while (!worklist.empty()) {
+        Loop *curr = worklist.back();
+        worklist.pop_back();
+        
+        KLoop kl;
+        kl.header = curr->getHeader();
+        for (auto *bb : curr->blocks()) {
+          kl.body.push_back(bb);
+        }
+        SmallVector<BasicBlock *, 8> exitBlocks;
+        curr->getExitBlocks(exitBlocks);
+        for (auto *bb : exitBlocks) {
+          kl.exits.push_back(bb);
+        }
+        loops[kl.header] = kl;
+        loopHeaders.insert(kl.header);
+
+        for (auto *sub : *curr) {
+          worklist.push_back(sub);
+        }
+      }
     }
   }
 }

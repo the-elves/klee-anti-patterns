@@ -28,6 +28,13 @@
 #include <set>
 #include <vector>
 
+namespace llvm {
+class BasicBlock;
+class Function;
+class Value;
+class raw_ostream;
+}
+
 namespace klee {
 class Array;
 class CallPathNode;
@@ -247,6 +254,12 @@ public:
 
   /// @brief Disables forking for this state. Set by user code
   bool forkDisabled = false;
+
+  /// @brief Loop summarization probing state
+  bool loopProbing = false;
+  llvm::BasicBlock *probingLoopHeader = nullptr;
+  std::map<const MemoryObject*, ref<Expr>> initialLoopValues;
+  ConstraintSet initialLoopConstraints;
 
   /// @brief Mapping symbolic address expressions to concrete base addresses
   using base_addrs_t = std::map<ref<Expr>, ref<ConstantExpr>>;

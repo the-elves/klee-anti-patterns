@@ -84,6 +84,14 @@ class MergeHandler;
 class MergingSearcher;
 template <class T> class ref;
 
+struct LoopAutomaton {
+  struct Transition {
+    ref<Expr> pathCondition;
+    std::map<const MemoryObject*, ref<Expr>> updates;
+  };
+  std::vector<Transition> transitions;
+};
+
 /// \todo Add a context object to keep track of data only live
 /// during an instruction step. Should contain addedStates,
 /// removedStates, and haltExecution, among others.
@@ -128,6 +136,8 @@ private:
   /// \invariant \ref removedStates is a subset of \ref states. 
   /// \invariant \ref addedStates and \ref removedStates are disjoint.
   std::vector<ExecutionState *> removedStates;
+
+  std::map<llvm::BasicBlock*, LoopAutomaton> loopAutomata;
 
   /// When non-empty the Executor is running in "seed" mode. The
   /// states in this map will be executed in an arbitrary order
@@ -231,11 +241,16 @@ private:
   void initializeGlobalAliases();
   void initializeGlobalObjects(ExecutionState &state);
 
-  void stepInstruction(ExecutionState &state);
   void updateStates(ExecutionState *current);
-  void transferToBasicBlock(llvm::BasicBlock *dst, 
+  void transferToBasicBlock(llvm::BasicBlock *dst,
 			    llvm::BasicBlock *src,
 			    ExecutionState &state);
+
+  bool summarizeLoop(ExecutionState &state, KFunction *kf, llvm::BasicBlock *dst);
+  bool summarizeLoopWithAutomaton(ExecutionState &state, KFunction *kf, KLoop &loop, LoopAutomaton &aut);
+  bool summarizeLoopMatrix(ExecutionState &state, KFunction *kf, KLoop &loop, LoopAutomaton &aut);
+
+  void stepInstruction(ExecutionState &state);
 
   void callExternalFunction(ExecutionState &state,
                             KInstruction *target,

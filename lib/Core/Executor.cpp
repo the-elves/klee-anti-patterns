@@ -136,6 +136,42 @@ cl::opt<bool> SingleObjectResolution(
 
 namespace {
 
+cl::opt<bool> SummarizeLoops(
+    "summarize-loops",
+    cl::init(false),
+    cl::desc("Enable loop summarization (experimental) (default=false)"),
+    cl::cat(MiscCat));
+
+enum LoopSummarizationApproach {
+  SymbolicIteration,
+  AutomataConstruction
+};
+
+cl::opt<LoopSummarizationApproach> SummarizeLoopsApproach(
+    "summarize-loops-approach",
+    cl::desc("Approach for loop summarization (default=symbolic-iteration)"),
+    cl::values(
+        clEnumValN(SymbolicIteration, "symbolic-iteration",
+                   "Generalize from symbolic iterations"),
+        clEnumValN(AutomataConstruction, "automata",
+                   "Construct a finite state automaton")),
+    cl::init(SymbolicIteration),
+    cl::cat(MiscCat));
+
+enum LoopSummarizationComplexity {
+  LinearIncrement,
+  MatrixBased
+};
+
+cl::opt<LoopSummarizationComplexity> SummarizeLoopsComplexity(
+    "summarize-loops-complexity",
+    cl::desc("Complexity of loop summarization (default=linear)"),
+    cl::values(
+        clEnumValN(LinearIncrement, "linear", "Handle constant increments"),
+        clEnumValN(MatrixBased, "matrix", "Handle matrix-based transitions")),
+    cl::init(LinearIncrement),
+    cl::cat(MiscCat));
+
 /*** Test generation options ***/
 
 cl::opt<bool> DumpStatesOnHalt(
@@ -1264,9 +1300,9 @@ void Executor::addConstraint(ExecutionState &state, ref<Expr> condition) {
                                  ConstantExpr::alloc(1, Expr::Bool));
 }
 
-const Cell& Executor::eval(KInstruction *ki, unsigned index, 
-                           ExecutionState &state) const {
+const Cell& Executor::eval(KInstruction *ki, unsigned index, ExecutionState &state) const {
   assert(index < ki->inst->getNumOperands());
+
   int vnumber = ki->operands[index];
 
   assert(vnumber != -1 &&
@@ -1453,6 +1489,17 @@ void Executor::printDebugInstructions(ExecutionState &state) {
 
 void Executor::stepInstruction(ExecutionState &state) {
   printDebugInstructions(state);
+
+  KFunction *kf = state.stack.back().kf;
+  // Check if we are at the beginning of a basic block that is a loop header
+  if (state.pc == &kf->instructions[kf->basicBlockEntry[state.pc->inst->getParent()]]) {
+    if (kf->loopHeaders.count(state.pc->inst->getParent())) {
+      if (summarizeLoop(state, kf, state.pc->inst->getParent())) {
+        return;
+      }
+    }
+  }
+
   if (statsTracker)
     statsTracker->stepInstruction(state);
 
@@ -2076,12 +2123,317 @@ void Executor::transferToBasicBlock(BasicBlock *dst, BasicBlock *src,
   
   // XXX this lookup has to go ?
   KFunction *kf = state.stack.back().kf;
+
   unsigned entry = kf->basicBlockEntry[dst];
   state.pc = &kf->instructions[entry];
   if (state.pc->inst->getOpcode() == Instruction::PHI) {
     PHINode *first = static_cast<PHINode*>(state.pc->inst);
     state.incomingBBIndex = first->getBasicBlockIndex(src);
+    if (state.incomingBBIndex >= first->getNumIncomingValues()) {
+        llvm::errs() << "transferToBasicBlock: incomingBBIndex " << state.incomingBBIndex 
+                     << " out of bounds for PHI node: " << *first << "\n";
+        llvm::errs() << "  Source BB: " << (src ? src->getName() : "null") << "\n";
+        llvm::errs().flush();
+    }
   }
+}
+
+bool Executor::summarizeLoop(ExecutionState &state, KFunction *kf, BasicBlock *dst) {
+  if (!SummarizeLoops)
+    return false;
+
+  if (state.loopProbing) {
+    if (state.probingLoopHeader == dst) {
+      // Probing iteration finished.
+      // Record transition in the automaton.
+      LoopAutomaton::Transition trans;
+      
+      // Extract path condition
+      auto it = state.constraints.begin();
+      std::advance(it, state.initialLoopConstraints.size());
+      trans.pathCondition = ConstantExpr::alloc(1, Expr::Bool);
+      for (; it != state.constraints.end(); ++it) {
+        trans.pathCondition = AndExpr::create(trans.pathCondition, *it);
+      }
+
+      // Extract updates
+      for (auto const& [mo, initialVal] : state.initialLoopValues) {
+        const ObjectState *os = state.addressSpace.findObject(mo);
+        ref<Expr> newVal = os->read(0, mo->size * 8);
+        if (initialVal != newVal) {
+          trans.updates[mo] = newVal;
+        }
+      }
+      loopAutomata[dst].transitions.push_back(trans);
+      
+      terminateStateEarly(state, "Loop probing path finished", StateTerminationType::Interrupted);
+      return true;
+    }
+    return false;
+  }
+
+  KLoop &loop = kf->loops[dst];
+
+  // If we already have an automaton for this loop, try to summarize.
+  if (loopAutomata.count(dst)) {
+    if (SummarizeLoopsApproach == AutomataConstruction) {
+      if (summarizeLoopWithAutomaton(state, kf, loop, loopAutomata[dst])) {
+        return true;
+      }
+    } else if (SummarizeLoopsApproach == SymbolicIteration) {
+      // TODO: Implement symbolic iteration approach if different.
+      // For now, automata approach is more general.
+    }
+  }
+
+  // If not probed yet, start probing.
+  static std::set<BasicBlock*> probingStarted;
+  if (probingStarted.insert(dst).second) {
+    klee_message("Starting loop probe for %s", dst->getName().data());
+    
+    // Use fork instead of manual branch to ensure correct state initialization (like incomingBBIndex)
+    StatePair branches = fork(state, ConstantExpr::alloc(1, Expr::Bool), true, BranchType::NONE);
+    ExecutionState *probingState = branches.first == &state ? branches.second : branches.first;
+    
+    if (!probingState) {
+        // fork might not have created a new state if condition was constant
+        probingState = state.branch();
+        addedStates.push_back(probingState);
+        if (executionTree)
+          executionTree->attach(state.executionTreeNode, probingState, &state, BranchType::NONE);
+    }
+    
+    // Crucial: copy incomingBBIndex so PHI nodes at the loop header can be evaluated.
+    probingState->incomingBBIndex = state.incomingBBIndex;
+
+    probingState->loopProbing = true;
+    probingState->probingLoopHeader = dst;
+    probingState->initialLoopConstraints = probingState->constraints;
+
+    // Identify modified objects (statically to seed initial values)
+    for (auto *bb : loop.body) {
+      unsigned entry = kf->basicBlockEntry[bb];
+      for (unsigned i = 0; i < bb->size(); ++i) {
+        KInstruction *ki = kf->instructions[entry + i];
+        if (ki->inst->getOpcode() == Instruction::Store) {
+          if (ki->inst->getNumOperands() >= 2) {
+            ref<Expr> addr = eval(ki, 1, *probingState).value;
+            if (addr.get() && isa<ConstantExpr>(addr)) {
+              ref<ConstantExpr> CE = cast<ConstantExpr>(addr);
+              ObjectPair op;
+              if (probingState->addressSpace.resolveOne(CE, op)) {
+                const MemoryObject *mo = op.first;
+                if (probingState->initialLoopValues.find(mo) == probingState->initialLoopValues.end()) {
+                  const ObjectState *os = probingState->addressSpace.findObject(mo);
+                  if (os) {
+                    probingState->initialLoopValues[mo] = os->read(0, mo->size * 8);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+bool Executor::summarizeLoopWithAutomaton(ExecutionState &state, KFunction *kf, KLoop &loop, LoopAutomaton &aut) {
+  if (SummarizeLoopsComplexity == MatrixBased) {
+    return summarizeLoopMatrix(state, kf, loop, aut);
+  }
+
+  if (aut.transitions.size() != 1) return false;
+  if (loop.exits.empty()) return false;
+  
+  klee_message("Summarizing loop at %s", loop.header->getName().data());
+
+  auto &trans = aut.transitions[0];
+  std::map<const MemoryObject*, ref<Expr>> deltas;
+
+  for (auto const& [mo, newVal] : trans.updates) {
+     const ObjectState *os = state.addressSpace.findObject(mo);
+     ref<Expr> initialVal = os->read(0, mo->size * 8);
+     ref<Expr> delta = SubExpr::create(newVal, initialVal);
+     delta = optimizer.optimizeExpr(delta, false);
+     if (isa<ConstantExpr>(delta)) {
+        deltas[mo] = delta;
+     } else {
+        klee_message("  Non-constant delta for %s, skipping", mo->name.c_str());
+        return false;
+     }
+  }
+
+  // Create symbolic number of iterations k
+  static unsigned kCount = 0;
+  std::string kName = "k_loop_" + std::to_string(kCount++);
+  const Array *array = arrayCache.CreateArray(kName, 4); 
+  ref<Expr> k = Expr::createTempRead(array, Expr::Int32);
+  
+  // k >= 0
+  addConstraint(state, SgeExpr::create(k, ConstantExpr::alloc(0, Expr::Int32)));
+
+  // Update all modified objects: v = v + k * delta
+  for (auto const& [mo, delta] : deltas) {
+     const ObjectState *os = state.addressSpace.findObject(mo);
+     ref<Expr> initialVal = os->read(0, mo->size * 8);
+     
+     // newVal = initialVal + k * delta
+     // Need to match widths
+     ref<Expr> k_ext = k;
+     if (k->getWidth() < initialVal->getWidth()) {
+       k_ext = ZExtExpr::create(k, initialVal->getWidth());
+     } else if (k->getWidth() > initialVal->getWidth()) {
+       k_ext = ExtractExpr::create(k, 0, initialVal->getWidth());
+     }
+     
+     ref<Expr> delta_ext = delta;
+     if (delta->getWidth() < initialVal->getWidth()) {
+       delta_ext = SExtExpr::create(delta, initialVal->getWidth());
+     }
+
+     ref<Expr> newVal = AddExpr::create(initialVal, 
+                                       MulExpr::create(k_ext, delta_ext));
+     
+     ObjectState *wos = state.addressSpace.getWriteable(mo, os);
+     wos->write(0, newVal);
+  }
+  
+  // Jump back to the loop header to let normal KLEE execution evaluate the exit condition
+  // with the new symbolic values of the sub-state.
+  unsigned entry = kf->basicBlockEntry[loop.header];
+  state.pc = &kf->instructions[entry];
+
+  // We need to set the incomingBBIndex correctly for the loop header PHI nodes.
+  if (state.pc->inst->getOpcode() == Instruction::PHI) {
+    PHINode *first = static_cast<PHINode*>(state.pc->inst);
+    bool found = false;
+    klee_message("Checking PHI node in header: %u incoming blocks", first->getNumIncomingValues());
+    for (unsigned i = 0; i < first->getNumIncomingValues(); ++i) {
+      BasicBlock *pred = first->getIncomingBlock(i);
+      klee_message("  Incoming block %u: %s", i, pred->getName().data());
+      if (std::find(loop.body.begin(), loop.body.end(), pred) != loop.body.end()) {
+        state.incomingBBIndex = i;
+        found = true;
+        klee_message("  Found back-edge at index %u", i);
+        break;
+      }
+    }
+    if (!found) {
+        klee_warning("Could not find back-edge predecessor for loop header PHI node");
+    }
+  }
+  
+  return true;
+}
+
+bool Executor::summarizeLoopMatrix(ExecutionState &state, KFunction *kf, KLoop &loop, LoopAutomaton &aut) {
+  if (aut.transitions.empty()) return false;
+  if (loop.exits.empty()) return false;
+
+  klee_message("Summarizing multi-path loop at %s using commutative linear logic", 
+               loop.header->getName().data());
+
+  // 1. Identify all modified objects and check if all updates are constant increments
+  std::set<const MemoryObject*> modified;
+  for (auto const& trans : aut.transitions) {
+    for (auto const& [mo, newVal] : trans.updates) {
+      modified.insert(mo);
+    }
+  }
+
+  std::map<const MemoryObject*, std::vector<ref<Expr>>> deltas;
+  for (auto *mo : modified) {
+    for (auto const& trans : aut.transitions) {
+      ref<Expr> delta;
+      auto it = trans.updates.find(mo);
+      if (it == trans.updates.end()) {
+        delta = ConstantExpr::alloc(0, Expr::Int32); // No change on this path
+      } else {
+        const ObjectState *os = state.addressSpace.findObject(mo);
+        ref<Expr> initialVal = os->read(0, mo->size * 8);
+        delta = SubExpr::create(it->second, initialVal);
+        delta = optimizer.optimizeExpr(delta, false);
+      }
+      
+      if (isa<ConstantExpr>(delta)) {
+        deltas[mo].push_back(delta);
+      } else {
+        klee_message("  Non-constant delta for %s in one of the paths, skipping", mo->name.c_str());
+        return false;
+      }
+    }
+  }
+
+  // 2. Create symbolic variables k_i for each path
+  std::vector<ref<Expr>> ks;
+  for (unsigned i = 0; i < aut.transitions.size(); ++i) {
+    std::string kName = "k_path_" + std::to_string(i) + "_" + std::to_string(state.id);
+    const Array *array = arrayCache.CreateArray(kName, 4);
+    ref<Expr> ki = Expr::createTempRead(array, Expr::Int32);
+    ks.push_back(ki);
+    
+    // k_i >= 0
+    addConstraint(state, SgeExpr::create(ki, ConstantExpr::alloc(0, Expr::Int32)));
+  }
+
+  // 3. Update all modified objects: v = v + sum(k_i * delta_i)
+  for (auto *mo : modified) {
+    const ObjectState *os = state.addressSpace.findObject(mo);
+    ref<Expr> val = os->read(0, mo->size * 8);
+    
+    for (unsigned i = 0; i < aut.transitions.size(); ++i) {
+      ref<Expr> delta = deltas[mo][i];
+      if (cast<ConstantExpr>(delta)->isZero()) continue;
+
+      // Match widths
+      ref<Expr> ki_ext = ks[i];
+      if (ki_ext->getWidth() < val->getWidth()) {
+        ki_ext = ZExtExpr::create(ki_ext, val->getWidth());
+      } else if (ki_ext->getWidth() > val->getWidth()) {
+        ki_ext = ExtractExpr::create(ki_ext, 0, val->getWidth());
+      }
+
+      ref<Expr> delta_ext = delta;
+      if (delta_ext->getWidth() < val->getWidth()) {
+        delta_ext = SExtExpr::create(delta_ext, val->getWidth());
+      }
+
+      val = AddExpr::create(val, MulExpr::create(ki_ext, delta_ext));
+    }
+    
+    ObjectState *wos = state.addressSpace.getWriteable(mo, os);
+    wos->write(0, val);
+  }
+
+  // Jump back to the loop header to let normal KLEE execution evaluate the exit condition
+  // with the new symbolic values of the sub-state.
+  unsigned entry = kf->basicBlockEntry[loop.header];
+  state.pc = &kf->instructions[entry];
+
+  // We need to set the incomingBBIndex correctly for the loop header PHI nodes.
+  if (state.pc->inst->getOpcode() == Instruction::PHI) {
+    PHINode *first = static_cast<PHINode*>(state.pc->inst);
+    bool found = false;
+    klee_message("Checking PHI node in header: %u incoming blocks", first->getNumIncomingValues());
+    for (unsigned i = 0; i < first->getNumIncomingValues(); ++i) {
+      BasicBlock *pred = first->getIncomingBlock(i);
+      klee_message("  Incoming block %u: %s", i, pred->getName().data());
+      if (std::find(loop.body.begin(), loop.body.end(), pred) != loop.body.end()) {
+        state.incomingBBIndex = i;
+        found = true;
+        klee_message("  Found back-edge at index %u", i);
+        break;
+      }
+    }
+    if (!found) {
+        klee_warning("Could not find back-edge predecessor for loop header PHI node");
+    }
+  }
+
+  return true;
 }
 
 /// Compute the true target of a function call, resolving LLVM aliases
